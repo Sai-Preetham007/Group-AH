@@ -1,0 +1,2 @@
+# This file ensures the training data directory is tracked by git
+# Training datasets and intermediate files will be stored here
