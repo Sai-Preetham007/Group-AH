@@ -5,15 +5,19 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+from contextlib import asynccontextmanager
 import logging
 import uvicorn
 import pandas as pd
 import json
 from pathlib import Path
-from .auth import (
-    UserLogin, UserRegister, Token, User, 
-    create_access_token, get_current_user, authenticate_user
+from .auth_db import (
+    UserLogin, UserRegister, Token, UserResponse, 
+    create_access_token, get_current_user, authenticate_user, create_user,
+    get_current_admin_user
 )
+from ..database import get_db, init_database, PredictionHistory
+from sqlalchemy.orm import Session
 from datetime import timedelta
 
 # Configure logging
@@ -27,6 +31,18 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Lifespan event handler
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize database on startup"""
+    try:
+        init_database()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+    yield
+    # Cleanup code can go here if needed
+
 # Pydantic models for symptom prediction
 class SymptomInput(BaseModel):
     symptoms: List[str]
@@ -38,6 +54,16 @@ class RiskFactor(BaseModel):
     level: str  # "Low", "Medium", "High"
     description: str
 
+class DrugInfo(BaseModel):
+    name: str
+    type: str  # "Prescription", "Over-the-counter", "Supplement"
+
+class TreatmentInfo(BaseModel):
+    drugs: List[DrugInfo]
+    treatments: List[str]
+    duration: str
+    notes: Optional[str] = None
+
 class DiseasePrediction(BaseModel):
     disease: str
     confidence: float
@@ -46,6 +72,7 @@ class DiseasePrediction(BaseModel):
     risk_factors: Optional[List[RiskFactor]] = None
     severity_score: Optional[float] = None
     urgency_level: Optional[str] = None  # "Low", "Medium", "High", "Emergency"
+    treatment_info: Optional[TreatmentInfo] = None
 
 class PredictionResponse(BaseModel):
     predictions: List[DiseasePrediction]
@@ -59,7 +86,8 @@ app = FastAPI(
     description="A healthcare-focused Retrieval-Augmented Generation system",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -71,11 +99,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Startup event removed - now handled by lifespan
+
 # Authentication endpoints
 @app.post("/auth/login", response_model=Token)
-async def login(user_credentials: UserLogin):
+async def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
     """Login endpoint for user authentication"""
-    user = authenticate_user(user_credentials.username, user_credentials.password)
+    user = authenticate_user(db, user_credentials.username, user_credentials.password)
     if not user:
         raise HTTPException(
             status_code=401,
@@ -84,62 +114,130 @@ async def login(user_credentials: UserLogin):
         )
     access_token_expires = timedelta(minutes=30)
     access_token = create_access_token(
-        data={"sub": user["username"]}, expires_delta=access_token_expires
+        data={"sub": user.username}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.get("/auth/me", response_model=User)
-async def read_users_me(current_user: User = Depends(get_current_user)):
+@app.get("/auth/me", response_model=UserResponse)
+async def read_users_me(current_user: UserResponse = Depends(get_current_user)):
     """Get current user information"""
     return current_user
 
-@app.post("/auth/register")
-async def register(user_data: UserRegister):
+@app.post("/auth/register", response_model=UserResponse)
+async def register(user_data: UserRegister, db: Session = Depends(get_db)):
     """Register new user"""
-    import src.api.auth as auth_module
-    
-    # Check if user already exists
-    if user_data.username in auth_module.users_db:
-        raise HTTPException(
-            status_code=400,
-            detail="Username already exists"
+    try:
+        new_user = create_user(db, user_data)
+        logger.info(f"New user registered: {user_data.username}")
+        
+        return UserResponse(
+            id=new_user.id,
+            username=new_user.username,
+            email=new_user.email,
+            full_name=new_user.full_name,
+            is_active=new_user.is_active,
+            is_admin=new_user.is_admin,
+            created_at=new_user.created_at
         )
-    
-    # Create new user (simplified - in production, hash passwords)
-    new_user = {
-        "username": user_data.username,
-        "password": user_data.password,  # In production, hash this
-        "email": user_data.email,
-        "full_name": user_data.full_name,
-        "is_active": True
-    }
-    
-    # Add to users database
-    auth_module.users_db[user_data.username] = new_user
-    
-    logger.info(f"New user registered: {user_data.username}")
-    
-    return {
-        "message": "User registered successfully",
-        "username": user_data.username,
-        "email": user_data.email,
-        "full_name": user_data.full_name
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error registering user: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error during registration"
+        )
 
-# Basic endpoints
+# User management endpoints
+@app.get("/users", response_model=List[UserResponse])
+async def get_users(
+    current_user: UserResponse = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Get all users (admin only)"""
+    from ..database import User
+    users = db.query(User).all()
+    return [
+        UserResponse(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            full_name=user.full_name,
+            is_active=user.is_active,
+            is_admin=user.is_admin,
+            created_at=user.created_at
+        )
+        for user in users
+    ]
+
+@app.get("/users/{user_id}", response_model=UserResponse)
+async def get_user(
+    user_id: int,
+    current_user: UserResponse = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get user by ID"""
+    from ..database import User
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Users can only access their own data unless they're admin
+    if not current_user.is_admin and current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    
+    return UserResponse(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        full_name=user.full_name,
+        is_active=user.is_active,
+        is_admin=user.is_admin,
+        created_at=user.created_at
+    )
+
+# User prediction history endpoint removed
+
+# Landing page - redirect to docs
 @app.get("/")
 async def root():
-    """Root endpoint with health check"""
-    return {
-        "status": "healthy",
-        "message": "Medical Knowledge RAG Chatbot is running",
-        "version": "1.0.0"
-    }
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "message": "Service is running"}
+    """Landing page - redirects to API documentation"""
+    from fastapi.responses import HTMLResponse
+    
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Medical Knowledge RAG Chatbot</title>
+        <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+        <link rel="shortcut icon" href="https://fastapi.tiangolo.com/img/favicon.png">
+        <style>
+            body { margin: 0; padding: 0; }
+            .swagger-ui .topbar { display: none; }
+        </style>
+    </head>
+    <body>
+        <div id="swagger-ui"></div>
+        <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+        <script>
+            const ui = SwaggerUIBundle({
+                url: '/openapi.json',
+                dom_id: '#swagger-ui',
+                layout: 'BaseLayout',
+                deepLinking: true,
+                showExtensions: true,
+                showCommonExtensions: true,
+                oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect',
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIBundle.SwaggerUIStandalonePreset
+                ]
+            })
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 
 # Load disease dataset
@@ -184,8 +282,94 @@ def load_disease_dataset():
         logger.error(f"Error loading dataset: {e}")
         return None
 
-# Global variable to store dataset
+# Global variables to store datasets
 disease_dataset = None
+drug_database = None
+symptom_descriptions = None
+symptom_precautions = None
+
+# Load symptom descriptions
+def load_symptom_descriptions():
+    """Load symptom descriptions from Kaggle dataset"""
+    global symptom_descriptions
+    try:
+        desc_path = Path("data/raw/Disease Dataset/symptom_Description.csv")
+        if desc_path.exists():
+            symptom_descriptions = pd.read_csv(desc_path)
+            logger.info(f"Loaded symptom descriptions with {len(symptom_descriptions)} diseases")
+        else:
+            logger.warning("Symptom descriptions not found")
+            symptom_descriptions = None
+    except Exception as e:
+        logger.error(f"Error loading symptom descriptions: {e}")
+        symptom_descriptions = None
+    return symptom_descriptions
+
+# Load symptom precautions
+def load_symptom_precautions():
+    """Load symptom precautions from Kaggle dataset"""
+    global symptom_precautions
+    try:
+        prec_path = Path("data/raw/Disease Dataset/symptom_precaution.csv")
+        if prec_path.exists():
+            symptom_precautions = pd.read_csv(prec_path)
+            logger.info(f"Loaded symptom precautions with {len(symptom_precautions)} diseases")
+        else:
+            logger.warning("Symptom precautions not found")
+            symptom_precautions = None
+    except Exception as e:
+        logger.error(f"Error loading symptom precautions: {e}")
+        symptom_precautions = None
+    return symptom_precautions
+
+# Load drug database
+def load_drug_database():
+    """Load drug information database"""
+    global drug_database
+    try:
+        drug_path = Path("data/raw/drug_database.json")
+        if drug_path.exists():
+            with open(drug_path, 'r') as f:
+                drug_database = json.load(f)
+            logger.info(f"Loaded drug database with {len(drug_database)} diseases")
+        else:
+            logger.warning("Drug database not found")
+            drug_database = {}
+    except Exception as e:
+        logger.error(f"Error loading drug database: {e}")
+        drug_database = {}
+
+# Get treatment information for a disease
+def get_treatment_info(disease_name: str) -> Optional[TreatmentInfo]:
+    """Get treatment information for a disease"""
+    global drug_database
+    
+    if drug_database is None:
+        load_drug_database()
+    
+    if disease_name in drug_database:
+        disease_info = drug_database[disease_name]
+        
+        # Convert drug names to DrugInfo objects
+        drugs = []
+        for drug_name in disease_info.get("drugs", []):
+            # Determine drug type based on name
+            drug_type = "Prescription"
+            if any(keyword in drug_name.lower() for keyword in ["vitamin", "supplement", "zinc"]):
+                drug_type = "Supplement"
+            elif any(keyword in drug_name.lower() for keyword in ["paracetamol", "ibuprofen", "antacids"]):
+                drug_type = "Over-the-counter"
+            
+            drugs.append(DrugInfo(name=drug_name, type=drug_type))
+        
+        return TreatmentInfo(
+            drugs=drugs,
+            treatments=disease_info.get("treatments", []),
+            duration=disease_info.get("duration", "Varies"),
+            notes=f"Consult healthcare provider for proper diagnosis and treatment"
+        )
+    
+    return None
 
 # Risk factor analysis function
 def analyze_risk_factors(disease_name: str, symptoms: List[str], age: Optional[int] = None, gender: Optional[str] = None) -> List[RiskFactor]:
@@ -385,7 +569,11 @@ def generate_llm_precautions(disease_name: str, symptoms: List[str], severity_sc
 
 # Disease prediction endpoint (protected)
 @app.post("/predict-disease", response_model=PredictionResponse)
-async def predict_disease(symptom_input: SymptomInput, current_user: User = Depends(get_current_user)):
+async def predict_disease(
+    symptom_input: SymptomInput, 
+    current_user: UserResponse = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """
     Predict disease based on symptoms using the actual dataset
     
@@ -442,6 +630,9 @@ async def predict_disease(symptom_input: SymptomInput, current_user: User = Depe
                     # Generate LLM-style precautions
                     llm_precautions = generate_llm_precautions(disease_name, input_symptoms, severity_score, urgency_level)
                     
+                    # Get treatment information
+                    treatment_info = get_treatment_info(disease_name)
+                    
                     prediction = DiseasePrediction(
                         disease=disease_name,
                         confidence=round(confidence, 2),
@@ -449,7 +640,8 @@ async def predict_disease(symptom_input: SymptomInput, current_user: User = Depe
                         precautions=llm_precautions,
                         risk_factors=risk_factors,
                         severity_score=round(severity_score, 1),
-                        urgency_level=urgency_level
+                        urgency_level=urgency_level,
+                        treatment_info=treatment_info
                     )
                     predictions.append(prediction)
             
@@ -460,18 +652,24 @@ async def predict_disease(symptom_input: SymptomInput, current_user: User = Depe
         else:
             # Fallback to mock predictions if dataset not available
             logger.warning("Using mock predictions - dataset not available")
+            # Get treatment info for mock predictions
+            common_cold_treatment = get_treatment_info("Common Cold")
+            influenza_treatment = get_treatment_info("Influenza")
+            
             predictions = [
                 DiseasePrediction(
                     disease="Common Cold",
                     confidence=0.75,
                     description="Viral infection affecting the upper respiratory tract",
-                    precautions=["Rest", "Stay hydrated", "Use humidifier", "Avoid close contact"]
+                    precautions=["Rest", "Stay hydrated", "Use humidifier", "Avoid close contact"],
+                    treatment_info=common_cold_treatment
                 ),
                 DiseasePrediction(
                     disease="Influenza",
                     confidence=0.65,
                     description="Viral infection with more severe symptoms than common cold",
-                    precautions=["Rest", "Stay hydrated", "Antiviral medication if prescribed", "Isolate from others"]
+                    precautions=["Rest", "Stay hydrated", "Antiviral medication if prescribed", "Isolate from others"],
+                    treatment_info=influenza_treatment
                 )
             ]
         
@@ -497,6 +695,21 @@ async def predict_disease(symptom_input: SymptomInput, current_user: User = Depe
             analysis_summary=analysis_summary
         )
         
+        # Save prediction history to database
+        if predictions:
+            top_prediction = predictions[0]
+            history_entry = PredictionHistory(
+                user_id=current_user.id,
+                symptoms=json.dumps(symptom_input.symptoms),
+                predicted_disease=top_prediction.disease,
+                confidence=str(top_prediction.confidence),
+                severity_score=str(top_prediction.severity_score),
+                urgency_level=top_prediction.urgency_level
+            )
+            db.add(history_entry)
+            db.commit()
+            logger.info(f"Saved prediction history for user {current_user.username}")
+        
         logger.info(f"Generated {len(predictions)} predictions")
         return response
         
@@ -506,7 +719,7 @@ async def predict_disease(symptom_input: SymptomInput, current_user: User = Depe
 
 # Get available symptoms (for frontend dropdown) - protected
 @app.get("/symptoms")
-async def get_available_symptoms(current_user: User = Depends(get_current_user)):
+async def get_available_symptoms(current_user: UserResponse = Depends(get_current_user)):
     """Get list of available symptoms from the dataset"""
     global disease_dataset
     
@@ -545,27 +758,92 @@ async def get_available_symptoms(current_user: User = Depends(get_current_user))
 @app.get("/disease/{disease_name}")
 async def get_disease_info(disease_name: str):
     """Get detailed information about a specific disease"""
-    # Mock disease information - in real implementation, load from dataset
-    disease_info = {
-        "common cold": {
-            "description": "Viral infection of the upper respiratory tract",
-            "symptoms": ["runny nose", "sneezing", "cough", "sore throat"],
-            "precautions": ["Rest", "Stay hydrated", "Use humidifier"],
-            "treatment": "Symptomatic treatment, usually resolves in 7-10 days"
-        },
-        "influenza": {
-            "description": "Viral infection with more severe symptoms",
-            "symptoms": ["fever", "chills", "muscle aches", "fatigue", "cough"],
-            "precautions": ["Rest", "Stay hydrated", "Antiviral medication"],
-            "treatment": "Antiviral drugs, supportive care"
-        }
-    }
+    global disease_dataset, symptom_descriptions, symptom_precautions
     
-    disease_key = disease_name.lower().replace(" ", "_")
-    if disease_key in disease_info:
-        return disease_info[disease_key]
-    else:
-        raise HTTPException(status_code=404, detail="Disease not found")
+    try:
+        # Load datasets if not already loaded
+        if disease_dataset is None:
+            disease_dataset = load_disease_dataset()
+        if symptom_descriptions is None:
+            symptom_descriptions = load_symptom_descriptions()
+        if symptom_precautions is None:
+            symptom_precautions = load_symptom_precautions()
+        
+        # Search for disease in dataset (case-insensitive)
+        disease_found = None
+        disease_lower = disease_name.lower()
+        
+        if disease_dataset is not None:
+            for _, row in disease_dataset.iterrows():
+                if disease_lower in row['Disease'].lower():
+                    disease_found = row
+                    break
+        
+        if disease_found is not None:
+            disease_name_found = disease_found['Disease']
+            
+            # Get symptoms for this disease
+            symptoms = []
+            for i in range(1, 18):  # Symptom_1 to Symptom_17
+                col_name = f'Symptom_{i}'
+                if col_name in disease_found and pd.notna(disease_found[col_name]) and disease_found[col_name].strip():
+                    symptoms.append(disease_found[col_name].strip())
+            
+            # Get description
+            description = "No description available"
+            if symptom_descriptions is not None:
+                desc_row = symptom_descriptions[symptom_descriptions['Disease'] == disease_name_found]
+                if not desc_row.empty:
+                    description = desc_row.iloc[0]['Description']
+            
+            # Get precautions
+            precautions = []
+            if symptom_precautions is not None:
+                prec_row = symptom_precautions[symptom_precautions['Disease'] == disease_name_found]
+                if not prec_row.empty:
+                    for i in range(1, 5):  # Precaution_1 to Precaution_4
+                        col_name = f'Precaution_{i}'
+                        if col_name in prec_row.columns and pd.notna(prec_row.iloc[0][col_name]) and prec_row.iloc[0][col_name].strip():
+                            precautions.append(prec_row.iloc[0][col_name].strip())
+            
+            # Get treatment information
+            treatment_info = get_treatment_info(disease_name_found)
+            
+            return {
+                "disease": disease_name_found,
+                "description": description,
+                "symptoms": symptoms,
+                "precautions": precautions,
+                "treatment_info": treatment_info.dict() if treatment_info else None
+            }
+        else:
+            # Fallback to mock data for common diseases
+            mock_diseases = {
+                "common cold": {
+                    "disease": "Common Cold",
+                    "description": "Viral infection of the upper respiratory tract",
+                    "symptoms": ["runny nose", "sneezing", "cough", "sore throat"],
+                    "precautions": ["Rest", "Stay hydrated", "Use humidifier"],
+                    "treatment_info": get_treatment_info("Common Cold").dict() if get_treatment_info("Common Cold") else None
+                },
+                "influenza": {
+                    "disease": "Influenza",
+                    "description": "Viral infection with more severe symptoms",
+                    "symptoms": ["fever", "chills", "muscle aches", "fatigue", "cough"],
+                    "precautions": ["Rest", "Stay hydrated", "Antiviral medication"],
+                    "treatment_info": get_treatment_info("Influenza").dict() if get_treatment_info("Influenza") else None
+                }
+            }
+            
+            disease_key = disease_name.lower().replace(" ", "_")
+            if disease_key in mock_diseases:
+                return mock_diseases[disease_key]
+            else:
+                raise HTTPException(status_code=404, detail=f"Disease '{disease_name}' not found in database")
+                
+    except Exception as e:
+        logger.error(f"Error getting disease info: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving disease information: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(
