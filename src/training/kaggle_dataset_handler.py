@@ -8,11 +8,9 @@ from typing import List, Dict, Any, Tuple, Optional
 import json
 import logging
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 import requests
 import zipfile
 import os
-from config import settings
 
 logger = logging.getLogger(__name__)
 

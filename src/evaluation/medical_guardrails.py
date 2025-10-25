@@ -4,7 +4,6 @@ Medical guardrails for safe and accurate responses
 import re
 from typing import List, Dict, Any, Optional, Tuple
 import logging
-from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -12,8 +11,8 @@ logger = logging.getLogger(__name__)
 class MedicalGuardrails:
     """Guardrails for medical safety and accuracy"""
     
-    def __init__(self):
-        self.safety_threshold = settings.safety_threshold
+    def __init__(self, safety_threshold: float = 0.8):
+        self.safety_threshold = safety_threshold
         self.medical_disclaimers = [
             "This information is for educational purposes only and should not replace professional medical advice.",
             "Please consult with a healthcare professional for medical decisions.",

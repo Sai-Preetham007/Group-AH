@@ -7,7 +7,6 @@ import json
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import logging
-from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +14,10 @@ logger = logging.getLogger(__name__)
 class MedicalDataLoader:
     """Load and preprocess medical data from various sources"""
     
-    def __init__(self):
-        self.fda_base_url = settings.fda_api_base_url
-        self.who_base_url = settings.who_api_base_url
-        self.clinical_trials_base_url = settings.clinical_trials_api_base_url
+    def __init__(self, fda_base_url: str = "https://api.fda.gov", who_base_url: str = "https://www.who.int"):
+        self.fda_base_url = fda_base_url
+        self.who_base_url = who_base_url
+        self.clinical_trials_base_url = "https://clinicaltrials.gov/api"
         
     def load_fda_drug_data(self, limit: int = 1000) -> List[Dict[str, Any]]:
         """Load drug data from FDA API"""

@@ -4,7 +4,6 @@ RAG Engine for Medical Knowledge Chatbot
 import openai
 from typing import List, Dict, Any, Optional
 import logging
-from config import settings
 from .vector_store import MedicalVectorStore
 
 logger = logging.getLogger(__name__)
@@ -13,15 +12,14 @@ logger = logging.getLogger(__name__)
 class MedicalRAGEngine:
     """RAG Engine for medical knowledge retrieval and generation"""
     
-    def __init__(self, vector_store: MedicalVectorStore):
+    def __init__(self, vector_store: MedicalVectorStore, llm_model: str = "gpt-3.5-turbo"):
         self.vector_store = vector_store
-        self.llm_model = settings.llm_model
+        self.llm_model = llm_model
         
         # Initialize OpenAI client
-        if settings.openai_api_key:
-            openai.api_key = settings.openai_api_key
-        else:
-            logger.warning("OpenAI API key not provided")
+        # Note: Set OPENAI_API_KEY environment variable
+        # openai.api_key = os.getenv("OPENAI_API_KEY")
+        logger.warning("OpenAI API key not provided")
     
     def retrieve_relevant_documents(self, query: str, top_k: int = None) -> List[Dict[str, Any]]:
         """Retrieve relevant documents for the query"""

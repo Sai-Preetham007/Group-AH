@@ -10,9 +10,9 @@ from pathlib import Path
 # Add src to path
 sys.path.append(str(Path(__file__).parent / "src"))
 
-from training.kaggle_dataset_handler import KaggleDiseaseDatasetHandler
-from training.trainer import MedicalRAGTrainer
-from training.dataset_handler import create_data_loader
+from src.training.kaggle_dataset_handler import KaggleDiseaseDatasetHandler
+from src.training.trainer import MedicalRAGTrainer
+from src.training.dataset_handler import create_data_loader
 import torch
 import json
 

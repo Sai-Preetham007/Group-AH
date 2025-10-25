@@ -7,7 +7,6 @@ from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any, Optional
 import logging
 from pathlib import Path
-from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -15,8 +14,8 @@ logger = logging.getLogger(__name__)
 class MedicalVectorStore:
     """Vector store for medical knowledge retrieval"""
     
-    def __init__(self):
-        self.embedding_model = SentenceTransformer(settings.embedding_model)
+    def __init__(self, embedding_model_name: str = "all-MiniLM-L6-v2"):
+        self.embedding_model = SentenceTransformer(embedding_model_name)
         self.chroma_client = None
         self.collection = None
         self._initialize_chroma()

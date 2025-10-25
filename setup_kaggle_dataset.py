@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.append(str(Path(__file__).parent / "src"))
 
-from training.kaggle_dataset_handler import KaggleDiseaseDatasetHandler
+from src.training.kaggle_dataset_handler import KaggleDiseaseDatasetHandler
 import logging
 
 # Configure logging
