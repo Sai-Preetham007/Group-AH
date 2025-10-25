@@ -24,7 +24,7 @@ class MedicalVectorStore:
         """Initialize ChromaDB client and collection"""
         try:
             # Ensure directory exists
-            persist_dir = Path(settings.chroma_persist_directory)
+            persist_dir = Path("chroma_db")
             persist_dir.mkdir(parents=True, exist_ok=True)
             
             # Initialize ChromaDB client

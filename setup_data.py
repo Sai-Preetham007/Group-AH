@@ -8,8 +8,8 @@ from pathlib import Path
 # Add src to path
 sys.path.append(str(Path(__file__).parent / "src"))
 
-from data_processing.medical_data_loader import MedicalDataLoader
-from rag.vector_store import MedicalVectorStore
+from src.data_processing.medical_data_loader import MedicalDataLoader
+from src.rag.vector_store import MedicalVectorStore
 import logging
 
 # Configure logging

@@ -2,13 +2,11 @@
 Dataset handling and preprocessing for ML training
 """
 import pandas as pd
-import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 import json
 import logging
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModel
 import requests
