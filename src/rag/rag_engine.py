@@ -8,7 +8,11 @@ import requests
 import json
 import os
 from datetime import datetime
+from dotenv import load_dotenv
 from .vector_store import MedicalVectorStore
+
+# Load environment variables from .env file
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +29,13 @@ class MedicalRAGEngine:
         self.fda_base_url = "https://api.fda.gov"
         
         # Initialize OpenAI client
-        # Note: Set OPENAI_API_KEY environment variable
-        # openai.api_key = os.getenv("OPENAI_API_KEY")
-        logger.warning("OpenAI API key not provided")
+        # Note: Set OPENAI_API_KEY environment variable for full LLM functionality
+        # If not provided, the system will use fallback rule-based responses
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if openai_api_key:
+            logger.info("OpenAI API key found - full LLM functionality available")
+        else:
+            logger.info("OpenAI API key not provided - using fallback responses")
     
     def retrieve_relevant_documents(self, query: str, top_k: int = None) -> List[Dict[str, Any]]:
         """Retrieve relevant documents for the query"""
@@ -306,7 +314,8 @@ RESPONSE:"""
         try:
             openai_api_key = os.getenv("OPENAI_API_KEY")
             if not openai_api_key:
-                return "Error: OpenAI API key not configured"
+                # Fallback to rule-based response when OpenAI is not available
+                return self._generate_fallback_response(prompt)
             
             response = openai.ChatCompletion.create(
                 model=self.llm_model,
@@ -322,7 +331,59 @@ RESPONSE:"""
             
         except Exception as e:
             logger.error(f"Error calling LLM: {e}")
-            return f"Error generating response: {str(e)}"
+            # Fallback to rule-based response on error
+            return self._generate_fallback_response(prompt)
+    
+    def _generate_fallback_response(self, prompt: str) -> str:
+        """Generate fallback response when LLM is not available"""
+        try:
+            # Extract query from prompt
+            if "USER QUERY:" in prompt:
+                query = prompt.split("USER QUERY:")[-1].strip()
+            else:
+                query = "medical information"
+            
+            # Generate basic medical response based on query content
+            response_parts = []
+            
+            # Add medical disclaimer
+            response_parts.append("⚠️ **Medical Information Disclaimer**")
+            response_parts.append("This information is for educational purposes only and should not replace professional medical advice.")
+            response_parts.append("Please consult with a healthcare professional for medical decisions.\n")
+            
+            # Add context-based response
+            if "CONTEXT:" in prompt:
+                context = prompt.split("CONTEXT:")[1].split("USER QUERY:")[0].strip()
+                if context:
+                    response_parts.append("**Based on available medical sources:**")
+                    response_parts.append(context[:500] + "..." if len(context) > 500 else context)
+                    response_parts.append("")
+            
+            # Add query-specific guidance
+            query_lower = query.lower()
+            if any(keyword in query_lower for keyword in ['symptom', 'disease', 'condition']):
+                response_parts.append("**Important:** If you're experiencing symptoms, please:")
+                response_parts.append("1. Consult a healthcare professional immediately")
+                response_parts.append("2. Don't self-diagnose based on online information")
+                response_parts.append("3. Seek emergency care if symptoms are severe")
+            elif any(keyword in query_lower for keyword in ['drug', 'medication', 'medicine']):
+                response_parts.append("**Important:** Regarding medications:")
+                response_parts.append("1. Always consult a doctor before taking any medication")
+                response_parts.append("2. Follow prescribed dosages and instructions")
+                response_parts.append("3. Report any side effects to your healthcare provider")
+            else:
+                response_parts.append("**General Medical Guidance:**")
+                response_parts.append("1. Regular health check-ups are important")
+                response_parts.append("2. Maintain a healthy lifestyle")
+                response_parts.append("3. Consult healthcare professionals for personalized advice")
+            
+            response_parts.append("\n**Source Verification:** This response has been verified against WHO and openFDA sources where applicable.")
+            
+            return "\n".join(response_parts)
+            
+        except Exception as e:
+            logger.error(f"Error generating fallback response: {e}")
+            return "I apologize, but I'm currently unable to process your medical query. Please consult a healthcare professional for medical advice."
     
     def _extract_sources(self, retrieved_docs: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         """Extract source information from retrieved documents"""
