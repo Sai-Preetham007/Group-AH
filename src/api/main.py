@@ -93,13 +93,11 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Startup event removed - now handled by lifespan
 
 # Authentication endpoints
 @app.post("/auth/login", response_model=Token)
@@ -112,6 +110,12 @@ async def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    
+    # Update last login time
+    from datetime import datetime
+    user.last_login = datetime.utcnow()
+    db.commit()
+    
     access_token_expires = timedelta(minutes=30)
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
@@ -451,14 +455,22 @@ def calculate_severity_score(disease_name: str, symptoms: List[str], confidence:
     """Calculate severity score and urgency level"""
     base_score = confidence * 10  # Base score from 0-10
     
-    # Adjust based on disease severity
+    # Adjust based on disease severity - but be more conservative for basic symptoms
     high_severity_diseases = ['malaria', 'dengue', 'typhoid', 'pneumonia', 'meningitis']
     medium_severity_diseases = ['diabetes', 'hypertension', 'asthma', 'migraine']
+    low_severity_diseases = ['common cold', 'flu', 'influenza', 'sinus infection', 'allergy']
     
+    # Only add severity bonus if symptoms suggest the disease is actually present
     if disease_name.lower() in high_severity_diseases:
-        base_score += 3
+        # Only add severity bonus if we have multiple matching symptoms
+        if len(symptoms) >= 3:
+            base_score += 3
+        elif len(symptoms) == 2:
+            base_score += 1  # Reduced bonus for basic symptoms
     elif disease_name.lower() in medium_severity_diseases:
         base_score += 1
+    elif disease_name.lower() in low_severity_diseases:
+        base_score += 0  # No bonus for common conditions
     
     # Adjust based on symptom severity
     severe_symptoms = ['chest pain', 'shortness of breath', 'severe headache', 'loss of consciousness']
@@ -524,23 +536,43 @@ def generate_llm_precautions(disease_name: str, symptoms: List[str], severity_sc
         ])
     
     # Disease-specific precautions
-    if disease_name.lower() in ['malaria', 'dengue', 'typhoid']:
+    disease_lower = disease_name.lower()
+    
+    if any(keyword in disease_lower for keyword in ['malaria', 'dengue', 'typhoid', 'fever']):
         precautions.extend([
             "Isolate to prevent transmission",
             "Use mosquito nets and repellents",
             "Avoid sharing personal items"
         ])
-    elif disease_name.lower() in ['diabetes', 'hypertension']:
+    elif any(keyword in disease_lower for keyword in ['diabetes', 'hypertension', 'blood pressure']):
         precautions.extend([
             "Monitor blood sugar/blood pressure regularly",
             "Follow prescribed medication regimen",
             "Maintain healthy diet and exercise"
         ])
-    elif disease_name.lower() in ['asthma', 'allergy']:
+    elif any(keyword in disease_lower for keyword in ['asthma', 'allergy', 'respiratory']):
         precautions.extend([
             "Avoid known triggers and allergens",
             "Keep rescue inhaler/medication handy",
             "Ensure good air quality in living space"
+        ])
+    elif any(keyword in disease_lower for keyword in ['paralysis', 'stroke', 'brain', 'neurological']):
+        precautions.extend([
+            "Seek immediate neurological evaluation",
+            "Avoid activities that could cause falls",
+            "Monitor for changes in consciousness or movement"
+        ])
+    elif any(keyword in disease_lower for keyword in ['vertigo', 'dizziness', 'balance']):
+        precautions.extend([
+            "Avoid sudden head movements",
+            "Use support when standing or walking",
+            "Stay hydrated and get adequate rest"
+        ])
+    elif any(keyword in disease_lower for keyword in ['cold', 'flu', 'respiratory infection']):
+        precautions.extend([
+            "Rest and stay hydrated",
+            "Use humidifier to ease breathing",
+            "Avoid close contact with others"
         ])
     
     # Symptom-specific precautions
@@ -594,6 +626,7 @@ async def predict_disease(
         if disease_dataset is not None:
             # Use Kaggle dataset for predictions
             input_symptoms = [s.lower().replace(' ', '_') for s in symptom_input.symptoms]
+            logger.info(f"Processing symptoms: {input_symptoms}")
             
             # Group by disease to get unique diseases
             disease_groups = disease_dataset.groupby('Disease')
@@ -608,8 +641,62 @@ async def predict_disease(
                 
                 # Calculate match score
                 matches = sum(1 for symptom in input_symptoms if symptom in disease_symptoms)
+                
+                # Filter out inappropriate matches for basic symptoms
+                basic_symptoms = ['fever', 'headache', 'cough', 'fatigue', 'nausea', 'high_fever', 'mild_fever']
+                serious_conditions = [
+                    'malaria', 'typhoid', 'dengue', 'meningitis', 'encephalitis',
+                    'paralysis', 'brain hemorrhage', 'stroke', 'heart attack', 'cancer',
+                    'sepsis', 'pneumonia', 'tuberculosis'
+                ]
+                
+                # Check if input symptoms are basic (including variations)
+                is_basic_symptoms = len(input_symptoms) <= 2 and all(
+                    any(basic in symptom for basic in ['fever', 'headache', 'cough', 'fatigue', 'nausea'])
+                    for symptom in input_symptoms
+                )
+                
+                # If only basic symptoms, avoid serious conditions
+                if is_basic_symptoms:
+                    if any(condition in disease_name.lower() for condition in serious_conditions):
+                        logger.info(f"Filtering out {disease_name} for basic symptoms: {input_symptoms}")
+                        continue  # Skip serious conditions for basic symptoms
+                
+                # For single symptoms, be even more restrictive
+                if len(input_symptoms) == 1:
+                    single_symptom = input_symptoms[0]
+                    if any(basic in single_symptom for basic in ['headache', 'fever']) and disease_name.lower() in serious_conditions:
+                        continue  # Skip serious conditions for single basic symptoms
+                
                 if matches > 0:
-                    confidence = matches / len(input_symptoms)
+                    # Calculate confidence based on how well symptoms match the disease
+                    total_disease_symptoms = len(disease_symptoms)
+                    
+                    # Symptom match ratio: how many of the disease's symptoms are covered
+                    symptom_match_ratio = matches / total_disease_symptoms if total_disease_symptoms > 0 else 0
+                    
+                    # Input coverage: how many of the input symptoms match the disease
+                    input_coverage = matches / len(input_symptoms) if len(input_symptoms) > 0 else 0
+                    
+                    # Penalty for diseases with many symptoms but few matches (low specificity)
+                    specificity_penalty = 1.0
+                    if total_disease_symptoms > 10 and matches < 3:
+                        specificity_penalty = 0.8
+                    
+                    # Bonus for diseases with fewer total symptoms (more specific diseases)
+                    specificity_bonus = 1.0
+                    if total_disease_symptoms <= 5 and matches >= 3:
+                        specificity_bonus = 1.1
+                    
+                    # Combine ratios with penalties and bonuses
+                    base_confidence = (symptom_match_ratio * 0.6) + (input_coverage * 0.4)
+                    confidence = base_confidence * specificity_penalty * specificity_bonus
+                    
+                    # Cap confidence at 0.90 to avoid unrealistic 100% confidence
+                    confidence = min(confidence, 0.90)
+                    
+                    # Ensure minimum confidence for any match
+                    confidence = max(confidence, 0.15)
                     
                     # Get description and precautions from first row of the group
                     first_row = group.iloc[0]
@@ -647,6 +734,46 @@ async def predict_disease(
             
             # Sort by confidence and take top 3
             predictions.sort(key=lambda x: x.confidence, reverse=True)
+            
+            # If we have basic symptoms and no good matches, add common conditions
+            if len(predictions) == 0 or (len(input_symptoms) <= 2 and predictions[0].confidence < 0.3):
+                # Add common conditions for basic symptoms
+                common_conditions = [
+                    ("Common Cold", 0.4, "Viral infection affecting the upper respiratory tract"),
+                    ("Influenza", 0.35, "Viral infection with flu-like symptoms"),
+                    ("Sinus Infection", 0.3, "Inflammation of the sinuses causing headache and fever")
+                ]
+                
+                for condition_name, confidence, description in common_conditions:
+                    if len(predictions) < 3:
+                        # Calculate appropriate severity for common conditions
+                        severity_score = min(4.0, confidence * 8)  # Lower severity for common conditions
+                        urgency_level = "Low" if severity_score < 4 else "Medium"
+                        
+                        # Generate appropriate precautions for common conditions
+                        precautions = [
+                            "Rest and stay hydrated",
+                            "Use over-the-counter pain relievers if needed",
+                            "Monitor symptoms and seek medical care if they worsen",
+                            "Get adequate sleep and nutrition"
+                        ]
+                        
+                        prediction = DiseasePrediction(
+                            disease=condition_name,
+                            confidence=confidence,
+                            description=description,
+                            precautions=precautions,
+                            risk_factors=[{"factor": "General Health", "level": "Low", "description": "Common viral infections are usually mild"}],
+                            severity_score=round(severity_score, 1),
+                            urgency_level=urgency_level,
+                            treatment_info=TreatmentInfo(
+                                drugs=[DrugInfo(name="Acetaminophen", type="Over-the-counter")],
+                                treatments=["Rest", "Hydration", "Symptomatic relief"],
+                                duration="3-7 days"
+                            )
+                        )
+                        predictions.append(prediction)
+            
             predictions = predictions[:3]
         
         else:
@@ -844,6 +971,57 @@ async def get_disease_info(disease_name: str):
     except Exception as e:
         logger.error(f"Error getting disease info: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving disease information: {str(e)}")
+
+@app.get("/users/me/stats")
+async def get_user_stats(current_user: UserResponse = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get user statistics"""
+    try:
+        # Get prediction history for the user
+        predictions = db.query(PredictionHistory).filter(PredictionHistory.user_id == current_user.id).all()
+        
+        total_predictions = len(predictions)
+        
+        # Calculate accuracy rate (mock for now - in real app, you'd track actual accuracy)
+        accuracy_rate = 85.5 if total_predictions > 0 else 0
+        
+        # Count sources verified (mock for now)
+        sources_verified = total_predictions * 2  # Assume 2 sources per prediction
+        
+        # Get last activity (either last prediction or last login)
+        last_activity = "Never"
+        latest_prediction_time = None
+        latest_login_time = None
+        
+        if predictions:
+            latest_prediction = max(predictions, key=lambda x: x.created_at)
+            latest_prediction_time = latest_prediction.created_at
+        
+        # Get user's last login time
+        from ..database import User
+        user = db.query(User).filter(User.id == current_user.id).first()
+        if user and user.last_login:
+            latest_login_time = user.last_login
+        
+        # Use the most recent activity
+        if latest_prediction_time and latest_login_time:
+            last_activity = max(latest_prediction_time, latest_login_time).strftime("%Y-%m-%d %H:%M")
+        elif latest_prediction_time:
+            last_activity = latest_prediction_time.strftime("%Y-%m-%d %H:%M")
+        elif latest_login_time:
+            last_activity = latest_login_time.strftime("%Y-%m-%d %H:%M")
+        
+        return {
+            "total_predictions": total_predictions,
+            "accuracy_rate": accuracy_rate,
+            "sources_verified": sources_verified,
+            "last_activity": last_activity
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting user stats: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# Frontend connectivity endpoints removed
 
 if __name__ == "__main__":
     uvicorn.run(

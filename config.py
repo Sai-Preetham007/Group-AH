@@ -17,7 +17,11 @@ class Settings(BaseSettings):
     # OpenAI Configuration
     openai_api_key: Optional[str] = None
     
+    # JWT Configuration
+    jwt_secret_key: str = "your-jwt-secret-key-change-in-production"
+    
     # Database Settings
+    database_url: str = "sqlite:///./medical_chatbot.db"
     vector_db_path: str = "./data/vector_db"
     chroma_db_path: str = "./data/chroma_db"
     
